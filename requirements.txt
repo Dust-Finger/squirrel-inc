@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+discord.py
+apscheduler
+python-dotenv
+jinja2
+aiohttp
+python-multipart

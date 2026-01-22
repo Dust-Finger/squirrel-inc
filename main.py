@@ -2,7 +2,7 @@ import asyncio
 import os
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands
@@ -39,23 +39,38 @@ async def check_reminders():
     """Background task to check DB for due reminders and send them."""
     try:
         pending = database.get_pending_reminders()
-        now = datetime.now()
+        # Ensure we compare against UTC because we store UTC now
+        now = datetime.now(timezone.utc)
+        
+        # Backward compatibility: older records might be naive (no timezone info)
+        # We assume those were server-local. But ideally we migrate.
+        # For this logic, we'll try to treat everything as aware.
         
         for r in pending:
+            # Parse stored time
             if isinstance(r['remind_time'], str):
                 try:
-                    remind_time = datetime.strptime(r['remind_time'], '%Y-%m-%d %H:%M:%S.%f')
-                except ValueError:
-                    # Fallback for formats without microseconds
+                    # Attempt robust parsing
                     try:
-                        remind_time = datetime.strptime(r['remind_time'], '%Y-%m-%d %H:%M:%S')
+                        remind_time = datetime.strptime(r['remind_time'], '%Y-%m-%d %H:%M:%S.%f%z')
                     except ValueError:
-                        # Fallback for ISO format just in case
-                         remind_time = datetime.fromisoformat(r['remind_time'])
+                        try:
+                            remind_time = datetime.strptime(r['remind_time'], '%Y-%m-%d %H:%M:%S%z')
+                        except ValueError:
+                            # Fallback for naive strings (old data or simple str())
+                            # Assume they are UTC if we are moving to UTC system
+                            rt_naive = datetime.fromisoformat(str(r['remind_time']).replace('Z', '+00:00'))
+                            if rt_naive.tzinfo is None:
+                                remind_time = rt_naive.replace(tzinfo=timezone.utc)
+                            else:
+                                remind_time = rt_naive
+                except ValueError:
+                     continue # Skip garbage data
             else:
-                remind_time = r['remind_time']
+                 remind_time = r['remind_time']
             
-            # If reminder is due (or past due)
+            # If reminder is due
+            # meaningful comparison requires both to be aware
             if remind_time <= now:
                 logger.info(f"Sending reminder: {r['message']}")
                 try:
@@ -168,19 +183,34 @@ async def read_root(request: Request):
 async def create_reminder(
     request: Request,
     message: str = Form(...),
-    event_time: str = Form(...), # expecting ISO datetime-local string
+    event_time: str = Form(...), # expecting ISO datetime-local string (Naive)
     offset_minutes: int = Form(...),
-    target_user: str = Form(...)
+    target_user: str = Form(...),
+    client_offset: int = Form(...) # Minutes from UTC
 ):
     try:
-        # event_time comes like '2023-10-27T14:30'
-        et = datetime.strptime(event_time, "%Y-%m-%dT%H:%M")
+        # 1. Parse the "Wall Clock" time the user typed (e.g. 5:00 PM)
+        # It has no timezone info attached yet.
+        naive_et = datetime.strptime(event_time, "%Y-%m-%dT%H:%M")
         
-        # Calculate when to actually ping
-        rt = et - timedelta(minutes=offset_minutes)
+        # 2. Convert to UTC
+        # client_offset is minutes BEHIND UTC (usually).
+        # Actually JS getTimezoneOffset() returns +min for West (US).
+        # So: Local + Offset = UTC
+        utc_et = naive_et + timedelta(minutes=client_offset)
         
-        database.add_reminder(message, rt, et, target_user)
-        logger.info(f"Created reminder for {target_user}. Event: {et}, Remind At: {rt}")
+        # Make it 'aware' so python knows it's UTC
+        utc_et = utc_et.replace(tzinfo=timezone.utc)
+        
+        # 3. Calculate Remind Time (also UTC)
+        utc_rt = utc_et - timedelta(minutes=offset_minutes)
+        
+        # Store as standard timestamps (or ISO strings)
+        # We will save them as naive UTC strings to keep SQLite simple, or just rely on str()
+        # Ideally, we format explicitly
+        
+        database.add_reminder(message, utc_rt, utc_et, target_user)
+        logger.info(f"Created reminder for {target_user}. Event(UTC): {utc_et}")
     except ValueError as e:
         logger.error(f"Date parsing error: {e}")
     

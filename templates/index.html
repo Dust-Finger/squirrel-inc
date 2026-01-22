@@ -54,12 +54,19 @@
         <div class="footer-decor">
             Powered by Squirrel Inc 🌰
         </div>
+
+        <!-- Hidden input for Timezone Offset -->
+        <input type="hidden" id="client_offset" name="client_offset">
     </div>
 
     <!-- Simple script to set default datetime to now + 1 hour -->
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const now = new Date();
+            // Set Hidden Offset (Minutes)
+            // Javascript returns positive for West of UTC (e.g., EST is 300)
+            document.getElementById('client_offset').value = now.getTimezoneOffset();
+
             now.setMinutes(now.getMinutes() - now.getTimezoneOffset() + 60); // Adjust for local timezone + 1 hour
             document.getElementById('event_time').value = now.toISOString().slice(0, 16);
         });
